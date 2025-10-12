@@ -379,6 +379,42 @@ class TenMicronMount:
         """
         return self.send_command(":pS", expect_response=True, terminated=True)
 
+    def get_element_temperature(self, element: int) -> Union[str, float]:
+        """
+        Get the temperature of element n with (`:GTMPn#`).
+        
+        Args
+        ----------
+        element : int
+            Element options:
+            - 1 Right Ascension/Azimuth motor driver
+            - 2 Declination/Altitude motor driver
+            - 7 Right Ascension/Azimuth motor
+            - 8 Declination/Altitude motor
+            - 9 Electronics box temperature sensor
+            - 11 Keypad (v2) display sensor
+            - 12 Keypad (v2) PCB sensor
+            - 13 Keypad (v2) controller sensor
+
+        Returns
+        --------
+        str: +TTT.T#
+            The required temperature in degrees Celsius (°C).
+            If the required temperature cannot be read, the string “Unavailable” is returned.
+        """
+        
+        temp = self.send_command(f":GTMP{element}", expect_response=True, terminated=True)
+        
+        if temp != "Unavailable":
+            try:
+                temp = float(temp)
+                return temp
+            except ValueError:
+                pass
+            raise MountError("Unknown temperature format")
+        else:
+            return temp
+    
     def start_tracking(self):
         """Enable tracking (`:AP#`)."""
         self.send_command(":AP", expect_response=False)
@@ -1048,6 +1084,33 @@ class TenMicronMount:
     # ------------------------------------------------------------------
     # Networking and IP utilities
     # ------------------------------------------------------------------
+    def get_connection_type(self) -> str:
+        """
+        Get the current connection type of the mount (`:GINQ#`).
+        
+        Returns
+        -------
+        str
+            A string describing the connection type:
+            - 'Serial RS-232'
+            - 'GPS or GPS/RS-232'
+            - 'Cabled LAN'
+            - 'Wireless LAN'
+            - 'Unknown' if the code is not recognized.
+        """
+        code = self.send_command(":GINQ", expect_response=True, terminated=True)
+        if code == "0":
+            return "Serial RS-232"
+        elif code == "1":
+            return "GPS or GPS/RS-232"
+        elif code == "2":
+            return "Cabled LAN"
+        elif code == "3":
+            return "Wireless LAN"
+        else:
+            raise MountError(f"Unknown connection type code: {code}")
+        
+    
     def get_ip_info(self, wireless: bool = False) -> Tuple[str, str, str, bool]:
         """
         Get the all IP information about the mount (`:GIP#`).
