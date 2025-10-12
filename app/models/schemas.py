@@ -101,13 +101,14 @@ class SetCoordinatesRequest(BaseModel):
     alt: Optional[str | float] = Field(None, description="Altitude in 'sDD:MM:SS.s' or decimal degrees.", examples=["+45:00:00"])
     az: Optional[str | float] = Field(None, description="Azimuth in 'DDD:MM:SS.s' or decimal degrees.", examples=["180:00:00"])
 
-class SlewRequest(BaseModel):
-    """Request to initiate a slew to the target."""
-    pier_side: Optional[str] = Field(None, description="Desired pier side ('E' or 'W'). Mount chooses if not specified.", examples=["E"])
-
 class MessageResponse(BaseModel):
     """Generic message response."""
     message: str = Field(..., examples=["Command issued."])
+
+class FlipResponse(BaseModel):
+    """Response to a flip mount request."""
+    sucess: bool = Field(..., description="True if the flip was successful.", examples=[True])
+    
 
 
 # ---------------- Dome ----------------
@@ -117,13 +118,64 @@ class DomeStatus(BaseModel):
 
 
 class DomeMoveRequest(BaseModel):
-    az: float = Field(..., ge=0.0, le=360.0, description="Target dome azimuth in degrees (0–360)", examples=[180.0])
+    az: float = Field(..., ge=0.0, le=360.0, description="Target dome azimuth in degrees (0-360)", examples=[180.0])
 
 
 class DomeSyncStatus(BaseModel):
     dome_sync: bool = Field(..., description="True if dome is syncing with telescope", examples=[True])
 
 
+
+
+
+
+
+
 # ---------------- Shutter ----------------
 class ShutterStatus(BaseModel):
     shutter: str = Field(..., description="Shutter state: 'open' or 'closed'", examples=["open"])
+
+
+
+
+# ---------------- System -----------------
+class SystemNetworkStatus(BaseModel):
+    name: str
+    family: Optional[str]
+    ip_address: Optional[str]
+    mac_address: Optional[str]
+    subnet_mask: Optional[str]
+    broadcast: Optional[str]
+    
+class DiskData(BaseModel):
+    device: str
+    mountpoint: str
+    fstype: str
+    total: Optional[str]
+    used: Optional[str]
+    free: Optional[str]
+    percent: Optional[float]
+
+class SystemStatus(BaseModel):
+    system: str
+    node_name: str
+    version: str
+    machine: str
+    processor: Optional[str]
+    boot_time: str
+    uptime: str
+    cpu_physical_cores: Optional[int]
+    cpu_logical_cores: Optional[int]
+    cpu_max_frequency: float
+    cpu_current_frequency: float
+    cpu_usage: float
+    memory_total: Optional[str]
+    memory_available: Optional[str]
+    memory_used: Optional[str]
+    memory_usage: float
+    disks: List[DiskData]
+    network_interfaces: List[SystemNetworkStatus]
+    network_sent: Optional[str]
+    network_received: Optional[str]
+    cpu_temperature: Optional[dict[str, list]]
+    

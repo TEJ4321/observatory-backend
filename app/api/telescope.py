@@ -9,7 +9,6 @@ from app.models.schemas import (
     HomeStatus,
     SetCoordinatesRequest,
     MessageResponse,
-    SlewRequest,
     TemperatureStatus
 )
 from app.api.tenmicron.tenmicron import TenMicronMount, MountError
@@ -219,6 +218,27 @@ def get_all_temperatures():
 # POST ROUTES (Control)
 # ----------------------------------------------------------------------
 
+@router.post("/tracking/start", response_model=MessageResponse)
+def start_tracking():
+    """Start tracking."""
+    if mount.is_tracking():
+        raise HTTPException(status_code=400, detail="Tracking is already enabled.")
+    if not mount.target_trackable():
+        raise HTTPException(status_code=400, detail="Target is not trackable. Set a new target")
+    
+    try:
+        mount.start_tracking()
+        return MessageResponse(message="Tracking enabled.")
+    except MountError as e:
+        raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
+
+@router.post("/tracking/stop", response_model=MessageResponse)
+def stop_tracking():
+    """Stop tracking."""
+    if mount.is_tracking():
+        mount.stop_tracking()
+        return MessageResponse(message="Tracking disabled.")
+
 @router.post("/target", response_model=MessageResponse)
 def set_target(coords: SetCoordinatesRequest):
     """Set the target coordinates for a future slew."""
@@ -239,17 +259,27 @@ def set_target(coords: SetCoordinatesRequest):
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/slew", response_model=MessageResponse)
-def slew_to_target(slew_request: SlewRequest):
+def slew_to_target(pier_side: str | None = None):
     """Slew to the currently set target coordinates."""
+    if pier_side is not None and pier_side not in ["East", "West"]:
+        raise HTTPException(status_code=400, detail="Invalid pier side. Must be 'East' or 'West'.")
+    
     try:
-        # The driver's slew command returns a complex string. We simplify it here.
-        # A more advanced implementation could parse the slew result code.
-        mount.slew_to_target_equatorial(pier_side=slew_request.pier_side)
+        mount.slew_to_target_equatorial(pier_side=pier_side)
         return MessageResponse(message="Slew command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/flip", response_model=MessageResponse)
+def flip_mount():
+    """Flip the mount's pier side."""
+    try:
+        mount.flip()
+        return MessageResponse(message="Flip command issued.")
+    except MountError as e:
+        raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/park", response_model=MessageResponse)
 def park_mount():
@@ -259,7 +289,7 @@ def park_mount():
         return MessageResponse(message="Park command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
-
+    
 @router.post("/unpark", response_model=MessageResponse)
 def unpark_mount():
     """Unpark the mount."""
@@ -278,16 +308,55 @@ def home_mount():
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
+@router.post("/nudge", response_model=MessageResponse)
+def nudge_mount(direction: str, duration_ms: int):
+    """Nudge the mount."""
+    
+    if direction not in ["N", "S", "E", "W", "n", "s", "e", "w"]:
+        raise HTTPException(status_code=400, detail="Invalid direction. Must be N, S, E, or W.")
+    
+    try:
+        mount.nudge(direction, duration_ms)
+        return MessageResponse(message="Nudge command issued.")
+    except MountError as e:
+        raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
+
+@router.post("/move", response_model=MessageResponse)
+def move_mount(direction: str):
+    """Start moving the mount in the specified direction."""
+    
+    if direction not in ["N", "S", "E", "W", "n", "s", "e", "w"]:
+        raise HTTPException(status_code=400, detail="Invalid direction. Must be N, S, E, or W.")
+    
+    try:
+        mount.move_direction(direction)
+        return MessageResponse(message="Move command issued.")
+    except MountError as e:
+        raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
+
+@router.post("/halt", response_model=MessageResponse)
+def halt_mount(direction: str | None = None):
+    """Halt the mount's current movement in 1 or all directions."""
+    
+    if direction == "":
+        direction = None
+    elif direction is not None and direction not in ["N", "S", "E", "W", "n", "s", "e", "w"]:
+        raise HTTPException(status_code=400, detail="Invalid direction. Must be N, S, E, or W.")
+    
+    try:
+        mount.halt_movement(direction)
+        return MessageResponse(message="Halt command issued.")
+    except MountError as e:
+        raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
+
 @router.post("/stop", response_model=MessageResponse)
 def stop_mount():
-    """Immediately stop all mount movement."""
+    """Immediately stop ALL mount movement including tracking, slewing and homing."""
     try:
         mount.stop_all_movement()
         return MessageResponse(message="STOP command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
-
-
 
 # ----------------------------------------------------------------------
 # FOR DEBUGGING TELESCOPE/DRIVER CODE
