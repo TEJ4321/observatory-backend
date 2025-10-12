@@ -250,23 +250,23 @@ class TenMicronMount:
         except Exception as exc:
             raise MountError(f"Error receiving response to '{cmd}': {exc}") from exc
 
-        print(f"Raw data response from (`{cmd}#`): {data}")  # Debug print
+        # print(f"Raw data response from (`{cmd}#`): {data}")  # Debug print
 
         # Might be better to just change to errors=ignore, but this allows conversion of 0xDF to degree symbol
         text = data.decode("utf-8", errors="backslashreplace").replace("\\xdf", "°").replace("ß", "°")
         
-        print(f"DECODED DATA: {text}")  # Debug print
+        # print(f"DECODED DATA: {text}")  # Debug print
         
         # Handle multiple replies merged in one packet
         if "#" in text:
             text = text.split("#")[0] + "#"  # take only the first full reply
             
-        print(f"SPLIT UP DECODED DATA: {text}")  # Debug print
+        # print(f"SPLIT UP DECODED DATA: {text}")  # Debug print
         
         # Trim terminator and whitespace
         text = text.rstrip("#").strip()
         
-        print(f"FINAL CLEANED DATA: {text}")  # Debug print
+        # print(f"FINAL CLEANED DATA: {text}")  # Debug print
         
         return text
     
