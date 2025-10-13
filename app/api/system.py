@@ -20,7 +20,7 @@ def get_size(bytes, suffix="B"):
             return f"{bytes:.2f}{unit}{suffix}"
         bytes /= factor
 
-@router.get("/system_info", response_model=SystemStatus)
+@router.get("/status", response_model=SystemStatus)
 async def get_all_system_info():
     """
     Get all system information.
