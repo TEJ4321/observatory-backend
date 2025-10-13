@@ -11,14 +11,15 @@ from app.models.schemas import (
     MessageResponse,
     TemperatureStatus
 )
-from app.api.tenmicron.tenmicron import TenMicronMount, MountError
+# from app.api.tenmicron.tenmicron import TenMicronMount, MountError
+from app.api.tenmicron.tenmicron_fake import TenMicronMountFake, MountError
 import logging
 import time
 from contextlib import asynccontextmanager
 
 
 router = APIRouter(prefix="/telescope", tags=["Telescope"])
-mount = TenMicronMount("192.168.1.10", port=3492, timeout=10)
+mount = TenMicronMountFake("192.168.1.10", port=3492, timeout=10)
 
 logger = logging.getLogger("telescope")
 
