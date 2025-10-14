@@ -288,12 +288,8 @@ class TenMicronMountFake:
 
     def get_sidereal_time(self) -> str:
         now = Time.now()
-        
-        
-        try:
-            return str(self._location.get_sidereal_time(kind='mean', model='IAU2006A', obstime=now))
-        except Exception as e:
-            return now.utc.strftime("%H:%M:%S") # type: ignore
+        sidereal_time = now.sidereal_time('mean', self._location.lon)
+        return sidereal_time.to_string(unit=u.hour, sep=':', pad=True, precision=2) # type: ignore
 
 
     def get_julian_date(self, extra_precision: bool = False, leap_seconds: bool = False) -> str:
