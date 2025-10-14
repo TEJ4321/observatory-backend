@@ -34,6 +34,7 @@ License: MIT
 import time
 import socket
 import re
+import asyncio
 from typing import Tuple, Optional, Union, List
 
 class MountError(Exception):
@@ -109,12 +110,13 @@ class TenMicronMount:
         self.port = port
         self.timeout = timeout
         self.sock: Optional[socket.socket] = None
+        self._lock = asyncio.Lock()
 
 
     # ------------------------------------------------------------------
     # Connection management
     # ------------------------------------------------------------------
-    def connect(self):
+    async def connect(self):
         """
         Establish a TCP/IP connection to the 10Micron mount and enable
         ultra-precision mode (U2).
@@ -131,20 +133,22 @@ class TenMicronMount:
             raise MountError(f"Failed to connect: {exc}") from exc
         
         # Enable ultra-precision mode - documented as a command that requires no reply
-        self.send_command(":U2", expect_response=False)
+        await self.send_command(":U2", expect_response=False)
+        
+        return
 
-    def close(self):
+    async def close(self):
         """Close the TCP connection to the mount."""
         if self.sock:
             try:
-                self.sock.close()
+                await asyncio.to_thread(self.sock.close)
             finally:
                 self.sock = None
 
     # ------------------------------------------------------------------
     # Core communication
     # ------------------------------------------------------------------
-    def send_command(
+    async def send_command(
             self,
             cmd: str,
             *,
@@ -187,88 +191,89 @@ class TenMicronMount:
         MountError
             If the connection fails or times out.
         """
-        if not self.sock:
-            raise MountError("Not connected to mount. Make sure IP and port are correct.")
-        if timeout is None:
-            timeout = self.timeout
-        self.sock.settimeout(timeout)
-        
-
-        # Send command
-        try:
-            self.sock.sendall(f"{cmd}#".encode("ascii"))
-        except Exception as e:
-            raise MountError(f"Failed to send command {cmd}: {e}") from e
-        
-        if not expect_response:
-            return ""
-        
-        # read according to deterministic expectation
-        data = b""
-        try:
-            if terminated:
-                # read until '#' arrives
-                while not data.endswith(b"#"):
-                    chunk = self.sock.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-            elif single_char:
-                # read exactly one byte (or up to 4 bytes if device occasionally sends small messages)
-                # use small blocking read; if the socket returns nothing or times out, raise.
-                chunk = self.sock.recv(4)
-                if not chunk:
-                    raise MountError(f"No response for single-char command '{cmd}'")
-                data += chunk[:1]  # only first significant char
-            else:
-                # variable-length non-terminated reply — read available bytes up to max_bytes,
-                # stop when no more data arrives within a short timeout slice.
-                # Use a short polling approach.
-                total = 0
-                # temporarily shorten timeout to avoid long blocking reads for non-terminated replies
-                short_timeout = max(unterminated_timeout, timeout / 10 if timeout else unterminated_timeout)
-                self.sock.settimeout(short_timeout)
-                while total < max_bytes:
-                    try:
-                        chunk = self.sock.recv(4096)
-                    except socket.timeout:
-                        # no more data
-                        break
-                    if not chunk:
-                        break
-                    data += chunk
-                    total += len(chunk)
-                # restore timeout to the per-call timeout
-                self.sock.settimeout(timeout if timeout else self.timeout)
-        except socket.timeout:
-            # If nothing was received at all, consider it a timeout error
-            if not data:
-                raise MountError(f"Timeout waiting for response to '{cmd}'")
-            if terminated:
-                raise MountError(f"Timeout waiting for terminator '#' in response to '{cmd}'")
-            # else proceed with whatever we might have (partial response)
-        except Exception as exc:
-            raise MountError(f"Error receiving response to '{cmd}': {exc}") from exc
-
-        # print(f"Raw data response from (`{cmd}#`): {data}")  # Debug print
-
-        # Might be better to just change to errors=ignore, but this allows conversion of 0xDF to degree symbol
-        text = data.decode("utf-8", errors="backslashreplace").replace("\\xdf", "°").replace("ß", "°")
-        
-        # print(f"DECODED DATA: {text}")  # Debug print
-        
-        # Handle multiple replies merged in one packet
-        if "#" in text:
-            text = text.split("#")[0] + "#"  # take only the first full reply
+        async with self._lock:
+            if not self.sock:
+                raise MountError("Not connected to mount. Make sure IP and port are correct.")
+            if timeout is None:
+                timeout = self.timeout
+            self.sock.settimeout(timeout)
             
-        # print(f"SPLIT UP DECODED DATA: {text}")  # Debug print
-        
-        # Trim terminator and whitespace
-        text = text.rstrip("#").strip()
-        
-        # print(f"FINAL CLEANED DATA: {text}")  # Debug print
-        
-        return text
+
+            # Send command
+            try:
+                await asyncio.to_thread(self.sock.sendall, f"{cmd}#".encode("ascii"))
+            except Exception as e:
+                raise MountError(f"Failed to send command {cmd}: {e}") from e
+            
+            if not expect_response:
+                return ""
+            
+            # read according to deterministic expectation
+            data = b""
+            try:
+                if terminated:
+                    # read until '#' arrives
+                    while not data.endswith(b"#"):
+                        chunk = await asyncio.to_thread(self.sock.recv, 4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                elif single_char:
+                    # read exactly one byte (or up to 4 bytes if device occasionally sends small messages)
+                    # use small blocking read; if the socket returns nothing or times out, raise.
+                    chunk = await asyncio.to_thread(self.sock.recv, 4)
+                    if not chunk:
+                        raise MountError(f"No response for single-char command '{cmd}'")
+                    data += chunk[:1]  # only first significant char
+                else:
+                    # variable-length non-terminated reply — read available bytes up to max_bytes,
+                    # stop when no more data arrives within a short timeout slice.
+                    # Use a short polling approach.
+                    total = 0
+                    # temporarily shorten timeout to avoid long blocking reads for non-terminated replies
+                    short_timeout = max(unterminated_timeout, timeout / 10 if timeout else unterminated_timeout)
+                    self.sock.settimeout(short_timeout)
+                    while total < max_bytes:
+                        try:
+                            chunk = await asyncio.to_thread(self.sock.recv, 4096)
+                        except socket.timeout:
+                            # no more data
+                            break
+                        if not chunk:
+                            break
+                        data += chunk
+                        total += len(chunk)
+                    # restore timeout to the per-call timeout
+                    self.sock.settimeout(timeout if timeout else self.timeout)
+            except socket.timeout:
+                # If nothing was received at all, consider it a timeout error
+                if not data:
+                    raise MountError(f"Timeout waiting for response to '{cmd}'")
+                if terminated:
+                    raise MountError(f"Timeout waiting for terminator '#' in response to '{cmd}'")
+                # else proceed with whatever we might have (partial response)
+            except Exception as exc:
+                raise MountError(f"Error receiving response to '{cmd}': {exc}") from exc
+
+            # print(f"Raw data response from (`{cmd}#`): {data}")  # Debug print
+
+            # Might be better to just change to errors=ignore, but this allows conversion of 0xDF to degree symbol
+            text = data.decode("utf-8", errors="backslashreplace").replace("\\xdf", "°").replace("ß", "°")
+            
+            # print(f"DECODED DATA: {text}")  # Debug print
+            
+            # Handle multiple replies merged in one packet
+            if "#" in text:
+                text = text.split("#")[0] + "#"  # take only the first full reply
+                
+            # print(f"SPLIT UP DECODED DATA: {text}")  # Debug print
+            
+            # Trim terminator and whitespace
+            text = text.rstrip("#").strip()
+            
+            # print(f"FINAL CLEANED DATA: {text}")  # Debug print
+            
+            return text
     
 
     # ------------------------------------------------------------------
@@ -320,17 +325,17 @@ class TenMicronMount:
     # Status
     # ------------------------------------------------------------------
     
-    def get_status_code(self) -> str:
+    async def get_status_code(self) -> str:
         """Return the raw status code (`:Gstat#`)."""
         # return self.send_command(":Gstat")
-        return self.send_command(":Gstat", expect_response=True, terminated=True, single_char=False)
+        return await self.send_command(":Gstat", expect_response=True, terminated=True, single_char=False)
 
-    def get_status(self) -> str:
+    async def get_status(self) -> str:
         """Returns human-readable mount status from (`:Gstat#`)."""
-        code = self.get_status_code()
+        code = await self.get_status_code()
         return self.STATUS_CODES.get(code, f"Unknown status code ({code})")
 
-    def is_tracking(self) -> bool:
+    async def is_tracking(self) -> bool:
         """
         Returns the mount's currently tracking status(`:GTRK#`).
         
@@ -338,9 +343,9 @@ class TenMicronMount:
         ----------
         Does not terminate with #
         """
-        return self.send_command(":GTRK", single_char=True, terminated=False) == '1'
+        return await self.send_command(":GTRK", single_char=True, terminated=False) == '1'
     
-    def target_trackable(self) -> bool:
+    async def target_trackable(self) -> bool:
         """
         Returns whether the target is trackable or not - the tracking status of the target (`:GTTRK#`).
         
@@ -354,9 +359,9 @@ class TenMicronMount:
         ----------
         Does not terminate with #
         """
-        return self.send_command(":GTTRK", single_char=True, terminated=False) == '1'
+        return await self.send_command(":GTTRK", single_char=True, terminated=False) == '1'
 
-    def is_ready(self) -> bool:
+    async def is_ready(self) -> bool:
         """
         NOTE: MIGHT NEED TO EDIT THIS (DEPRECATED?)
         
@@ -365,10 +370,10 @@ class TenMicronMount:
         Use get_status_code method to be exact.
         """
         
-        code = self.get_status_code()
+        code = await self.get_status_code()
         return code in ("0", "7")  # Tracking or idle
 
-    def pier_side(self) -> str:
+    async def pier_side(self) -> str:
         """
         Return the current pier side (`:pS#`).
 
@@ -377,9 +382,9 @@ class TenMicronMount:
         str
             'East' for east, 'West' for west.
         """
-        return self.send_command(":pS", expect_response=True, terminated=True)
+        return await self.send_command(":pS", expect_response=True, terminated=True)
 
-    def get_element_temperature(self, element: int) -> Union[str, float]:
+    async def get_element_temperature(self, element: int) -> Union[str, float]:
         """
         Get the temperature of element n with (`:GTMPn#`).
         
@@ -403,7 +408,7 @@ class TenMicronMount:
             If the required temperature cannot be read, the string “Unavailable” is returned.
         """
         
-        temp = self.send_command(f":GTMP{element}", expect_response=True, terminated=True)
+        temp = await self.send_command(f":GTMP{element}", expect_response=True, terminated=True)
         
         if temp != "Unavailable":
             try:
@@ -415,51 +420,51 @@ class TenMicronMount:
         else:
             return temp
     
-    def start_tracking(self):
+    async def start_tracking(self):
         """Enable tracking (`:AP#`)."""
-        self.send_command(":AP", expect_response=False)
+        await self.send_command(":AP", expect_response=False)
         
-    def stop_tracking(self):
+    async def stop_tracking(self):
         """Disable tracking (`:AL#`)."""
-        self.send_command(":AL", expect_response=False)
+        await self.send_command(":AL", expect_response=False)
 
     # ------------------------------------------------------------------
     # Firmware and version info
     # ------------------------------------------------------------------
     
-    def firmware_date(self) -> str:
+    async def firmware_date(self) -> str:
         """Return firmware build date (`:GVD#`)."""
-        return self.send_command(":GVD", expect_response=True, terminated=True)
+        return await self.send_command(":GVD", expect_response=True, terminated=True)
     
-    def firmware_number(self) -> str:
+    async def firmware_number(self) -> str:
         """Return firmware number (`:GVN#`)."""
-        return self.send_command(":GVN", expect_response=True, terminated=True)
+        return await self.send_command(":GVN", expect_response=True, terminated=True)
 
-    def product_name(self) -> str:
+    async def product_name(self) -> str:
         """Return product name (`:GVP#`)."""
-        return self.send_command(":GVP", expect_response=True, terminated=True)
+        return await self.send_command(":GVP", expect_response=True, terminated=True)
 
-    def firmware_time(self) -> str:
+    async def firmware_time(self) -> str:
         """Get firmware time (`:GVT#`)."""
-        return self.send_command(":GVT", expect_response=True, terminated=True)
+        return await self.send_command(":GVT", expect_response=True, terminated=True)
     
-    def hardware_version(self) -> str:
+    async def hardware_version(self) -> str:
         """Get hardware control box version (`:GVZ#`)."""
-        return self.send_command(":GVZ", expect_response=True, terminated=True)
+        return await self.send_command(":GVZ", expect_response=True, terminated=True)
 
     # ------------------------------------------------------------------
     # Mount Position Getters
     # ------------------------------------------------------------------
 
-    def get_mount_ra(self) -> str:
+    async def get_mount_ra(self) -> str:
         """Return the current Right Ascension of the mount (`:GR#`)."""
-        return self.send_command(":GR", expect_response=True, terminated=True)
+        return await self.send_command(":GR", expect_response=True, terminated=True)
 
-    def get_mount_dec(self) -> str:
+    async def get_mount_dec(self) -> str:
         """Return the current Declination of the mount (`:GD#`)."""
-        return self.send_command(":GD", expect_response=True, terminated=True)
+        return await self.send_command(":GD", expect_response=True, terminated=True)
     
-    def get_mount_ra_dec(self, as_float=False) -> Tuple[Union[str, float], Union[str, float]]:
+    async def get_mount_ra_dec(self, as_float=False) -> Tuple[Union[str, float], Union[str, float]]:
         """
         Return current RA and Dec in a tuple containing two strings or floats depending on as_float.
         
@@ -471,21 +476,21 @@ class TenMicronMount:
         as_float : bool
             If True, return (hours, degrees) as floats.
         """
-        ra = self.get_mount_ra()
-        dec = self.get_mount_dec()
+        ra = await self.get_mount_ra()
+        dec = await self.get_mount_dec()
         if as_float:
             return self._hms_to_hours(ra), self._dms_to_degrees(dec)
         return ra, dec
     
-    def get_mount_alt(self) -> str:
+    async def get_mount_alt(self) -> str:
         """Return current Altitude of the mount (`:GA#`)."""
-        return self.send_command(":GA", expect_response=True, terminated=True)
+        return await self.send_command(":GA", expect_response=True, terminated=True)
 
-    def get_mount_az(self) -> str:
+    async def get_mount_az(self) -> str:
         """Return current Azimuth of the mount (`:GZ#`)."""
-        return self.send_command(":GZ", expect_response=True, terminated=True)
+        return await self.send_command(":GZ", expect_response=True, terminated=True)
 
-    def get_mount_alt_az(self, as_float=False) -> Tuple[Union[str, float], Union[str, float]]:
+    async def get_mount_alt_az(self, as_float=False) -> Tuple[Union[str, float], Union[str, float]]:
         """
         Return current Alt and Az in a tuple containing two strings or floats depending on as_float.
 
@@ -497,8 +502,8 @@ class TenMicronMount:
         as_float : bool
             If True, return (degrees, degrees) as floats.
         """
-        alt = self.get_mount_alt()
-        az = self.get_mount_az()
+        alt = await self.get_mount_alt()
+        az = await self.get_mount_az()
         if as_float:
             return self._dms_to_degrees(alt), self._dms_to_degrees(az)
         return alt, az
@@ -507,7 +512,7 @@ class TenMicronMount:
     # Target Position Getters
     # ------------------------------------------------------------------
     
-    def get_target_ra(self) -> str:
+    async def get_target_ra(self) -> str:
         """
         Return the current target Right Ascension - whether the mount is tracking the target or not (`:Gr#`).
         
@@ -515,9 +520,9 @@ class TenMicronMount:
         - If target set using Alt/Az coordinates, returns the RA calculated from Alt/Az currently.
         - If no target is set, returns nothing.
         """
-        return self.send_command(":Gr", expect_response=True, terminated=True)
+        return await self.send_command(":Gr", expect_response=True, terminated=True)
     
-    def get_target_dec(self) -> str:
+    async def get_target_dec(self) -> str:
         """
         Return the current target Declination - whether the mount is tracking the target or not (`:Gd#`).
         
@@ -525,9 +530,9 @@ class TenMicronMount:
         - If target set using Alt/Az coordinates, returns the Dec calculated from Alt/Az currently.
         - If no target is set, returns nothing.
         """
-        return self.send_command(":Gd", expect_response=True, terminated=True)
+        return await self.send_command(":Gd", expect_response=True, terminated=True)
     
-    def get_target_ra_dec(self, as_float=False) -> Tuple[Union[str, float], Union[str, float]]:
+    async def get_target_ra_dec(self, as_float=False) -> Tuple[Union[str, float], Union[str, float]]:
         """
         Return target RA and Dec in a tuple containing two strings or floats depending on as_float.
         
@@ -543,13 +548,13 @@ class TenMicronMount:
         ----------
         If no target is set, returns nothing.
         """
-        ra = self.get_target_ra()
-        dec = self.get_target_dec()
+        ra = await self.get_target_ra()
+        dec = await self.get_target_dec()
         if as_float:
             return self._hms_to_hours(ra), self._dms_to_degrees(dec)
         return ra, dec
     
-    def get_target_alt(self) -> str:
+    async def get_target_alt(self) -> str:
         """
         Return the current target Altitude for the next slew (`:Ga#`).
         
@@ -557,9 +562,9 @@ class TenMicronMount:
         - If target set using equatorial coordinates, returns the Alt calculated from RA/Dec currently.
         - If no target is set, returns nothing.
         """
-        return self.send_command(":Ga", expect_response=True, terminated=True)
+        return await self.send_command(":Ga", expect_response=True, terminated=True)
     
-    def get_target_az(self) -> str:
+    async def get_target_az(self) -> str:
         """
         Return the current target Azimuth for the next slew (`:Gz#`).
         
@@ -567,9 +572,9 @@ class TenMicronMount:
         - If target set using equatorial coordinates, returns the Az calculated from RA/Dec currently.
         - If no target is set, returns nothing.
         """
-        return self.send_command(":Gz", expect_response=True, terminated=True)
+        return await self.send_command(":Gz", expect_response=True, terminated=True)
     
-    def get_target_alt_az(self, as_float=False) -> Tuple[Union[str, float], Union[str, float]]:
+    async def get_target_alt_az(self, as_float=False) -> Tuple[Union[str, float], Union[str, float]]:
         """
         Return target Alt and Az in a tuple containing two strings or floats depending on as_float.
 
@@ -585,8 +590,8 @@ class TenMicronMount:
         ----------
         If no target is set, returns nothing.
         """
-        alt = self.get_target_alt()
-        az = self.get_target_az()
+        alt = await self.get_target_alt()
+        az = await self.get_target_az()
         if as_float:
             return self._dms_to_degrees(alt), self._dms_to_degrees(az)
         return alt, az
@@ -595,7 +600,7 @@ class TenMicronMount:
     # Target Position Setters
     # ------------------------------------------------------------------
     
-    def set_target_ra(self, ra: Union[str, float]) -> str:
+    async def set_target_ra(self, ra: Union[str, float]) -> str:
         """
         Set target Right Ascension for a future slew.
 
@@ -611,9 +616,9 @@ class TenMicronMount:
         """
         if isinstance(ra, (int, float)):
             ra = self._hours_to_hms(ra)
-        return self.send_command(f":Sr{ra}", expect_response=True, terminated=False, single_char=True)
+        return await self.send_command(f":Sr{ra}", expect_response=True, terminated=False, single_char=True)
     
-    def set_target_dec(self, dec: Union[str, float]) -> str:
+    async def set_target_dec(self, dec: Union[str, float]) -> str:
         """
         Set target Declination for a future slew.
 
@@ -629,9 +634,9 @@ class TenMicronMount:
         """
         if isinstance(dec, (int, float)):
             dec = self._degrees_to_dms(dec, signed=True)
-        return self.send_command(f":Sd{dec}", expect_response=True, terminated=False, single_char=True)
+        return await self.send_command(f":Sd{dec}", expect_response=True, terminated=False, single_char=True)
     
-    def set_target_ra_dec(self, ra: Union[str, float], dec: Union[str, float]) -> dict:
+    async def set_target_ra_dec(self, ra: Union[str, float], dec: Union[str, float]) -> dict:
         """
         Set target RA/Dec coordinates for a slew.
 
@@ -648,11 +653,11 @@ class TenMicronMount:
             Dictionary with 'ra' and 'dec' keys indicating success ('1') or failure ('0').
         """
         return {
-            "ra": self.set_target_ra(ra),
-            "dec": self.set_target_dec(dec)
+            "ra": await self.set_target_ra(ra),
+            "dec": await self.set_target_dec(dec)
         }
 
-    def set_target_alt(self, alt: Union[str, float]) -> str:
+    async def set_target_alt(self, alt: Union[str, float]) -> str:
         """
         Set target Altitude for a future slew.
 
@@ -668,9 +673,9 @@ class TenMicronMount:
         """
         if isinstance(alt, (int, float)):
             alt = self._degrees_to_dms(alt, signed=True)
-        return self.send_command(f":Sa{alt}", expect_response=True, terminated=False, single_char=True)
+        return await self.send_command(f":Sa{alt}", expect_response=True, terminated=False, single_char=True)
 
-    def set_target_az(self, az: Union[str, float]) -> str:
+    async def set_target_az(self, az: Union[str, float]) -> str:
         """
         Set target Azimuth for a future slew.
 
@@ -686,9 +691,9 @@ class TenMicronMount:
         """
         if isinstance(az, (int, float)):
             az = self._degrees_to_dms(az, signed=False)
-        return self.send_command(f":Sz{az}", expect_response=True, terminated=False, single_char=True)
+        return await self.send_command(f":Sz{az}", expect_response=True, terminated=False, single_char=True)
 
-    def set_target_alt_az(self, alt: Union[str, float], az: Union[str, float]) -> dict:
+    async def set_target_alt_az(self, alt: Union[str, float], az: Union[str, float]) -> dict:
         """
         Set target Alt/Az coordinates for a slew.
 
@@ -705,15 +710,15 @@ class TenMicronMount:
             Dictionary with 'alt' and 'az' keys indicating success ('1') or failure ('0').
         """
         return {
-            "alt": self.set_target_alt(alt),
-            "az": self.set_target_az(az)
+            "alt": await self.set_target_alt(alt),
+            "az": await self.set_target_az(az)
         }
 
     # ------------------------------------------------------------------
     # Slew commands
     # ------------------------------------------------------------------
 
-    def slew_to_target_equatorial(self, pier_side: Optional[str]) -> str:
+    async def slew_to_target_equatorial(self, pier_side: Optional[str]) -> str:
         """
         Slew to the previously set RA/Dec target (`:MS#`) and start tracking the target.
         
@@ -733,12 +738,12 @@ class TenMicronMount:
         if pier_side is not None and pier_side != "" and pier_side not in {"E", "W", "e", "w"}:
             raise ValueError("Pier side must be one of E, W")
         if pier_side == "E" or pier_side == "e":
-            return self.send_command(f":MSfs3", expect_response=False, terminated=False)
+            return await self.send_command(f":MSfs3", expect_response=False, terminated=False)
         if pier_side == "W" or pier_side == "w":
-            return self.send_command(f":MSfs2", expect_response=False, terminated=False)
-        return self.send_command(":MS", expect_response=True, terminated=False)
+            return await self.send_command(f":MSfs2", expect_response=False, terminated=False)
+        return await self.send_command(":MS", expect_response=True, terminated=False)
 
-    def slew_to_target_altaz(self) -> str:
+    async def slew_to_target_altaz(self) -> str:
         """
         Slew to the previously set Alt/Az target (`:MA#`) and DON'T TRACK the target.
 
@@ -747,9 +752,9 @@ class TenMicronMount:
         str
             '0' if no error, and a human-readable message if there is an error.
         """
-        return self.send_command(":MA", expect_response=False, terminated=False)
+        return await self.send_command(":MA", expect_response=False, terminated=False)
     
-    def set_max_slew_rate(self, rate: int) -> str:
+    async def set_max_slew_rate(self, rate: int) -> str:
         """
         Set the maximum slew rate to "rate" degrees per second (`:Sw{rate}#`).
 
@@ -761,17 +766,17 @@ class TenMicronMount:
         str:
             '0' if rate is invalid, '1' if valid.
         """
-        return self.send_command(f":Sw{rate}", expect_response=True, terminated=False, single_char=True)
+        return await self.send_command(f":Sw{rate}", expect_response=True, terminated=False, single_char=True)
     
     # ------------------------------------------------------------------
     # Movement and motion control
     # ------------------------------------------------------------------
     
-    def stop_all_movement(self):
+    async def stop_all_movement(self):
         """Immediately stop ALL movement including slewing, parking and tracking (`:STOP#`)."""
-        self.send_command(":STOP", expect_response=False)
+        await self.send_command(":STOP", expect_response=False)
 
-    def halt_movement(self, direction: Optional[str] = None):
+    async def halt_movement(self, direction: Optional[str] = None):
         """
         Halts all current slewing (`:Q#`). Also supports halting movement in only one direction, but halts all movement by default.
         
@@ -789,9 +794,9 @@ class TenMicronMount:
         if direction is not None and direction not in {"N", "S", "E", "W", "n", "s", "e", "w"}:
             raise ValueError("Direction must be one of N, S, E, W")
         if direction is not None:
-            self.send_command(f":Q{direction.lower()}", expect_response=False)
+            await self.send_command(f":Q{direction.lower()}", expect_response=False)
 
-    def move_direction(self, direction: str):
+    async def move_direction(self, direction: str):
         """
         Start manual movement in a cardinal direction.
 
@@ -808,9 +813,9 @@ class TenMicronMount:
         direction = direction.upper()
         if direction not in {"N", "S", "E", "W", "n", "s", "e", "w"}:
             raise ValueError("Direction must be one of N, S, E, W")
-        self.send_command(f":M{direction.lower()}", expect_response=False)
+        await self.send_command(f":M{direction.lower()}", expect_response=False)
 
-    def nudge(self, direction: str, ms: int):
+    async def nudge(self, direction: str, ms: int):
         """
         Nudge the mount in a cardinal direction for a specified duration.
 
@@ -831,11 +836,11 @@ class TenMicronMount:
         if ms <= 0:
             raise ValueError("Duration must be a positive integer")
         
-        self.move_direction(direction)
-        time.sleep(ms / 1000.0)
-        self.halt_movement(direction)
+        await self.move_direction(direction)
+        await asyncio.sleep(ms / 1000.0)
+        await self.halt_movement(direction)
 
-    def flip(self) -> str:
+    async def flip(self) -> str:
         """
         Flip the mount to the opposite pier side (`:FLIP#`).
         
@@ -850,32 +855,32 @@ class TenMicronMount:
         str
             '0' if flip not possible at this time, '1' if flip successful
         """
-        return self.send_command(":FLIP", expect_response=True, terminated=False, single_char=True)
+        return await self.send_command(":FLIP", expect_response=True, terminated=False, single_char=True)
 
     # ------------------------------------------------------------------
     # Home and park control
     # ------------------------------------------------------------------
-    def park(self):
+    async def park(self):
         """Park the mount (`:hP#`)."""
-        self.send_command(":hP", expect_response=False)
+        await self.send_command(":hP", expect_response=False)
 
-    def unpark(self):
+    async def unpark(self):
         """Unpark the mount (`:PO#`)."""
-        self.send_command(":PO", expect_response=False)
+        await self.send_command(":PO", expect_response=False)
 
-    def seek_home(self):
+    async def seek_home(self):
         """Begin a homing sequence (`:hS#`)."""
-        self.send_command(":hS", expect_response=False)
+        await self.send_command(":hS", expect_response=False)
 
-    def home_status(self) -> str:
+    async def home_status(self) -> str:
         """Return the home position status (`:h?#`)."""
-        return self.send_command(":h?", expect_response=True, terminated=False, single_char=True)
+        return await self.send_command(":h?", expect_response=True, terminated=False, single_char=True)
 
     # ------------------------------------------------------------------
     # Limits / Safety
     # ------------------------------------------------------------------
     
-    def get_lower_limit(self) -> str:
+    async def get_lower_limit(self) -> str:
         """
         Get lower limit (`:Gl#`).
         
@@ -886,9 +891,9 @@ class TenMicronMount:
         str
             Signed lower limit in degrees (e.g., "+10" for 10°).
         """
-        return self.send_command(":Go", expect_response=True, terminated=True)
+        return await self.send_command(":Gl", expect_response=True, terminated=True)
 
-    def get_upper_limit(self) -> str:
+    async def get_upper_limit(self) -> str:
         """
         Get upper limit (`:Gh#`).
         
@@ -899,9 +904,9 @@ class TenMicronMount:
         str
             Signed upper limit in degrees (e.g., "+85" for 85°).
         """
-        return self.send_command(":Gh", expect_response=True, terminated=True)
+        return await self.send_command(":Gh", expect_response=True, terminated=True)
 
-    def set_high_alt_limit(self, degrees: int) -> str:
+    async def set_high_alt_limit(self, degrees: int) -> str:
         """
         Set upper altitude limit (`:Sh+{degrees}#`).
         
@@ -919,49 +924,49 @@ class TenMicronMount:
         
         if degrees < 0 or degrees > 90:
             raise ValueError("Upper limit must be between 0 and 90 degrees")
-        return self.send_command(f":Sh+{degrees}", terminated=False, single_char=True)
+        return await self.send_command(f":Sh+{degrees}", terminated=False, single_char=True)
 
     # ------------------------------------------------------------------
     # Time and date control
     # ------------------------------------------------------------------
     
-    def get_local_time(self) -> str:
+    async def get_local_time(self) -> str:
         """
         Return local time (`:GL#`).
         
         Returns time in HH:MM:SS.SS format.
         """
-        return self.send_command(":GL", expect_response=True, terminated=True)
+        return await self.send_command(":GL", expect_response=True, terminated=True)
 
-    def get_current_date(self) -> str:
+    async def get_current_date(self) -> str:
         """
         Return current date (`:GC#`).
         
         Returns date in YYYY-MM-DD format.
         """
-        return self.send_command(":GC", expect_response=True, terminated=True)
+        return await self.send_command(":GC", expect_response=True, terminated=True)
 
-    def get_local_date_time(self) -> Tuple[str, str]:
+    async def get_local_date_time(self) -> Tuple[str, str]:
         """
         Return local date and time (`:GLDT#`).
         
         Returns a tuple of (date, time) in (YYYY-MM-DD, HH:MM:SS.SS) format.
         """
-        response = self.send_command(":GLDT", expect_response=True, terminated=True)
+        response = await self.send_command(":GLDT", expect_response=True, terminated=True)
         date_str, time_str = response.split(",")
         return date_str, time_str
     
-    def get_utc_date_time(self) -> Tuple[str, str]:
+    async def get_utc_date_time(self) -> Tuple[str, str]:
         """
         Return UTC date and time (`:GUDT#`).
         
         Returns a tuple of (date, time) in (YYYY-MM-DD, HH:MM:SS.SS) format.
         """
-        response = self.send_command(":GUDT", expect_response=True, terminated=True)
+        response = await self.send_command(":GUDT", expect_response=True, terminated=True)
         date_str, time_str = response.split(",")
         return date_str, time_str
     
-    def get_utc_offset(self) -> str:
+    async def get_utc_offset(self) -> str:
         """
         Return the current UTC offset (`:GG#`).
         
@@ -970,17 +975,17 @@ class TenMicronMount:
         str
             Signed UTC offset in sHH:MM:SS.S format (e.g., "+05:30:00.0" for UTC+5:30).
         """
-        return self.send_command(":GG", expect_response=True, terminated=True)
+        return await self.send_command(":GG", expect_response=True, terminated=True)
     
-    def get_sidereal_time(self) -> str:
+    async def get_sidereal_time(self) -> str:
         """
         Return local sidereal time (`:GS#`).
         
         Returns time in HH:MM:SS.SS format.
         """
-        return self.send_command(":GS", expect_response=True, terminated=True)
+        return await self.send_command(":GS", expect_response=True, terminated=True)
     
-    def get_julian_date(self, extra_precision: bool = False, leap_seconds: bool = False) -> str:
+    async def get_julian_date(self, extra_precision: bool = False, leap_seconds: bool = False) -> str:
         """
         Return Julian date (`:GJD#`).
         
@@ -1004,24 +1009,24 @@ class TenMicronMount:
 
         """
         if leap_seconds:
-            return self.send_command(":GJD2")
+            return await self.send_command(":GJD2") # This is not async, assuming it's a less common path. If used, make it async.
         elif extra_precision:
-            return self.send_command(":GJD1")
+            return await self.send_command(":GJD1") # This is not async, assuming it's a less common path. If used, make it async.
         else:
-            return self.send_command(":GJD")
+            return await self.send_command(":GJD") # This is not async, assuming it's a less common path. If used, make it async.
 
-    def set_local_time(self, time_hms: str) -> str:
+    async def set_local_time(self, time_hms: str) -> str:
         """
         Set local time (`SL{time_hms}#`).
 
         Parameters
         ----------
-        hhmmss : str
+        time_hms : str
             Time in HH:MM:SS.SS format.
         """
-        return self.send_command(f":SL{time_hms}", terminated=False, single_char=True)
+        return await self.send_command(f":SL{time_hms}", terminated=False, single_char=True)
 
-    def set_local_date_time(self, date_iso: str, time_hms: str) -> str:
+    async def set_local_date_time(self, date_iso: str, time_hms: str) -> str:
         """
         Set local date and time together (`:SLDT{date_iso,time_hms}#`).
         - Local Time: HH:MM:SS (hours, minutes, seconds)
@@ -1034,9 +1039,9 @@ class TenMicronMount:
         time_hms : str
             Time in HH:MM:SS format, optionally with up to 2 decimal places of seconds.
         """
-        return self.send_command(f":SLDT{date_iso},{time_hms}", terminated=False, single_char=True)
+        return await self.send_command(f":SLDT{date_iso},{time_hms}", terminated=False, single_char=True)
     
-    def set_utc_date_time(self, date_iso: str, time_hms: str) -> str:
+    async def set_utc_date_time(self, date_iso: str, time_hms: str) -> str:
         """
         Set UTC date and time together (`:SUDT{date_iso,time_hms}#`).
         - UTC Time: HH:MM:SS (hours, minutes, seconds)
@@ -1049,9 +1054,9 @@ class TenMicronMount:
         time_hms : str
             Time in HH:MM:SS format, optionally with up to 2 decimal places of seconds.
         """
-        return self.send_command(f":SUDT{date_iso},{time_hms}", terminated=False, single_char=True)
+        return await self.send_command(f":SUDT{date_iso},{time_hms}", terminated=False, single_char=True)
 
-    def set_julian_date(self, jd_value: str) -> str:
+    async def set_julian_date(self, jd_value: str) -> str:
         """
         Set Julian date (`:SJD{jd_value}#`) to given value up to 8 decimal places.
         
@@ -1060,9 +1065,9 @@ class TenMicronMount:
         jd_value : str
             Julian date string in the format `JJJJJJJ.JJJJJ` or `JJJJJJJ.JJJJJJJJ`.
         """
-        return self.send_command(f":SJD{jd_value}", terminated=False, single_char=True)
+        return await self.send_command(f":SJD{jd_value}", terminated=False, single_char=True)
 
-    def adjust_mount_time(self, ms: int) -> bool:
+    async def adjust_mount_time(self, ms: int) -> bool:
         """
         Adjust the mount's time by a specified signed number of milliseconds (`:NUtim{ms}#`).
         
@@ -1079,12 +1084,12 @@ class TenMicronMount:
         if ms < -999 or ms > 999:
             raise ValueError("Milliseconds adjustment must be between -999 and 999")
         
-        return self.send_command(f":AT{ms}", expect_response=True, terminated=True) == '1'
+        return await self.send_command(f":AT{ms}", expect_response=True, terminated=True) == '1'
 
     # ------------------------------------------------------------------
     # Networking and IP utilities
     # ------------------------------------------------------------------
-    def get_connection_type(self) -> str:
+    async def get_connection_type(self) -> str:
         """
         Get the current connection type of the mount (`:GINQ#`).
         
@@ -1098,7 +1103,7 @@ class TenMicronMount:
             - 'Wireless LAN'
             - 'Unknown' if the code is not recognized.
         """
-        code = self.send_command(":GINQ", expect_response=True, terminated=True)
+        code = await self.send_command(":GINQ", expect_response=True, terminated=True)
         if code == "0":
             return "Serial RS-232"
         elif code == "1":
@@ -1111,7 +1116,7 @@ class TenMicronMount:
             raise MountError(f"Unknown connection type code: {code}")
         
     
-    def get_ip_info(self, wireless: bool = False) -> Tuple[str, str, str, bool]:
+    async def get_ip_info(self, wireless: bool = False) -> Tuple[str, str, str, bool]:
         """
         Get the all IP information about the mount (`:GIP#`).
         
@@ -1138,9 +1143,9 @@ class TenMicronMount:
         """
 
         if wireless:
-            networkstats = self.send_command(":GIPW", expect_response=True, terminated=True)
+            networkstats = await self.send_command(":GIPW", expect_response=True, terminated=True)
         else:
-            networkstats = self.send_command(":GIP", expect_response=True, terminated=True)
+            networkstats = await self.send_command(":GIP", expect_response=True, terminated=True)
             
         ip, subnet, gateway, dhcp = networkstats.split(",")
         
@@ -1154,7 +1159,7 @@ class TenMicronMount:
             
         return ip, subnet, gateway, dhcp
 
-    def scan_wireless(self) -> bool:
+    async def scan_wireless(self) -> bool:
         """
         Start scanning for wireless access points (`:GWRSC#`).
         
@@ -1163,9 +1168,9 @@ class TenMicronMount:
         Returns:
             bool: True if wireless adapter is available, False otherwise.
         """
-        return self.send_command(":GWRSC", expect_response=True, terminated=True) == '1'
+        return await self.send_command(":GWRSC", expect_response=True, terminated=True) == '1'
     
-    def wireless_access_points(self) -> List[Tuple[str, str]]:
+    async def wireless_access_points(self) -> List[Tuple[str, str]]:
         """
         Get the wireless access points available with encryption information (`:GWRAP2#`).
         
@@ -1175,7 +1180,7 @@ class TenMicronMount:
             A list of tuples containing (SSID, Security Type).
             - Example: [("MyWiFi", "WPA2"), ("GuestNetwork", "Open")]
         """
-        response = self.send_command(":GWRAP2", expect_response=True, terminated=True)
+        response = await self.send_command(":GWRAP2", expect_response=True, terminated=True)
         
         if response == "0":
             return []  # No wireless available
@@ -1209,90 +1214,90 @@ class TenMicronMount:
     # ------------------------------------------------------------------
     # Event logging
     # ------------------------------------------------------------------
-    def start_log(self):
+    async def start_log(self):
         """
         Request the mount to start logging events to its internal memory (`:startlog#`).
         
         Access the event log using the get_event_log method (`:evlog#`) or get_communication_log method (`:getlog#`).
         """
-        return self.send_command(":startlog", expect_response=False)
+        return await self.send_command(":startlog", expect_response=False)
 
-    def stop_log(self):
+    async def stop_log(self):
         """
         Request the mount to stop logging events to its internal memory (`:stoplog#`).
         
         Access the event log using the get_event_log method (`:evlog#`) or get_communication_log method (`:getlog#`).
         """
-        return self.send_command(":stoplog", expect_response=False)
+        return await self.send_command(":stoplog", expect_response=False)
 
-    def get_event_log(self) -> str:
+    async def get_event_log(self) -> str:
         """
         Get the event log from the mount's internal memory (`:evlog#`).
         
         Returns a string containing the event log entries (up to 3Kbytes).
         """
-        return self.send_command(":evlog", expect_response=True, terminated=False, max_bytes=3100)
+        return await self.send_command(":evlog", expect_response=True, terminated=False, max_bytes=3100)
     
-    def get_communication_log(self) -> str:
+    async def get_communication_log(self) -> str:
         """
         Get the communication log from the mount's internal memory (`:getlog#`).
         
         Returns a string containing the communication log entries (up to 256Kbytes).
         """
-        return self.send_command(":getlog", expect_response=True, terminated=False, max_bytes=262144)
+        return await self.send_command(":getlog", expect_response=True, terminated=False, max_bytes=262144)
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
     # Example usage
-    mount = TenMicronMount("192.168.1.10", port=3492)
-    mount.connect()
+    # mount = TenMicronMount("192.168.1.10", port=3492)
+    # mount.connect()
 
-    # Status
-    print("\n===================================")
-    print("Status")
-    print("===================================")
-    print("Status Code:", mount.get_status_code())
-    print("Status:", mount.get_status())
-    print("Tracking: ", mount.is_tracking())
-    print("Target Trackable: ", mount.target_trackable())
-    print("Is Ready for Slew:", mount.is_ready())
-    print("Pier Side:", mount.pier_side())
+    # # Status
+    # print("\n===================================")
+    # print("Status")
+    # print("===================================")
+    # print("Status Code:", mount.get_status_code())
+    # print("Status:", mount.get_status())
+    # print("Tracking: ", mount.is_tracking())
+    # print("Target Trackable: ", mount.target_trackable())
+    # print("Is Ready for Slew:", mount.is_ready())
+    # print("Pier Side:", mount.pier_side())
     
-    # Firmware and version info
-    print("\n===================================")
-    print("Firmware and version info")
-    print("===================================")
-    print("Firmware Date:", mount.firmware_date())
-    print("Firmware Number:", mount.firmware_number())
-    print("Product Name:", mount.product_name())
-    print("Firmware Time:", mount.firmware_time())
-    print("Hardware Version:", mount.hardware_version())
+    # # Firmware and version info
+    # print("\n===================================")
+    # print("Firmware and version info")
+    # print("===================================")
+    # print("Firmware Date:", mount.firmware_date())
+    # print("Firmware Number:", mount.firmware_number())
+    # print("Product Name:", mount.product_name())
+    # print("Firmware Time:", mount.firmware_time())
+    # print("Hardware Version:", mount.hardware_version())
     
-    # Mount Position Getters
-    print("\n===================================")
-    print("Mount Position Getters")
-    print("===================================")
-    print("Current RA:", mount.get_mount_ra())
-    print("Current Dec:", mount.get_mount_dec())
-    print("Current RA/Dec:", mount.get_mount_ra_dec())
-    print("Current RA/Dec (float):", mount.get_mount_ra_dec(as_float=True))
-    print("Current Alt:", mount.get_mount_alt())
-    print("Current Az:", mount.get_mount_az())
-    print("Current Alt/Az:", mount.get_mount_alt_az())
-    print("Current Alt/Az (float):", mount.get_mount_alt_az(as_float=True))
+    # # Mount Position Getters
+    # print("\n===================================")
+    # print("Mount Position Getters")
+    # print("===================================")
+    # print("Current RA:", mount.get_mount_ra())
+    # print("Current Dec:", mount.get_mount_dec())
+    # print("Current RA/Dec:", mount.get_mount_ra_dec())
+    # print("Current RA/Dec (float):", mount.get_mount_ra_dec(as_float=True))
+    # print("Current Alt:", mount.get_mount_alt())
+    # print("Current Az:", mount.get_mount_az())
+    # print("Current Alt/Az:", mount.get_mount_alt_az())
+    # print("Current Alt/Az (float):", mount.get_mount_alt_az(as_float=True))
     
-    # Target Position Getters
-    print("\n===================================")
-    print("Target Position Getters")
-    print("===================================")
-    print("Target RA:", mount.get_target_ra())
-    print("Target Dec:", mount.get_target_dec())
-    print("Target RA/Dec:", mount.get_target_ra_dec())
-    print("Target RA/Dec (float):", mount.get_target_ra_dec(as_float=True))
-    print("Target Alt:", mount.get_target_alt())
-    print("Target Az:", mount.get_target_az())
-    print("Target Alt/Az:", mount.get_target_alt_az())
-    print("Target Alt/Az (float):", mount.get_target_alt_az(as_float=True))
+    # # Target Position Getters
+    # print("\n===================================")
+    # print("Target Position Getters")
+    # print("===================================")
+    # print("Target RA:", mount.get_target_ra())
+    # print("Target Dec:", mount.get_target_dec())
+    # print("Target RA/Dec:", mount.get_target_ra_dec())
+    # print("Target RA/Dec (float):", mount.get_target_ra_dec(as_float=True))
+    # print("Target Alt:", mount.get_target_alt())
+    # print("Target Az:", mount.get_target_az())
+    # print("Target Alt/Az:", mount.get_target_alt_az())
+    # print("Target Alt/Az (float):", mount.get_target_alt_az(as_float=True))
     
     
     
-    mount.close()
+    # mount.close()

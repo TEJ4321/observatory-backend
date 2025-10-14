@@ -1,25 +1,33 @@
-# server.py
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from app.api.routes import router as api_router
-from app.api.dome import router as dome_router
-from app.api.shutter import router as shutter_router
-# from app.api.FAKEtelescope import router as telescope_router
-from app.api.telescope import router as telescope_router
-from app.api.system import router as system_router
-from app.api.telescope import lifespan
+import logging
 
+from app.api import routes, telescope, dome, shutter, system
+from app.api.telescope import mount, MountError
 
-app = FastAPI(
-    title="Tejas Thesis Backend",
-    version="0.1.0",
-    description="Backend server for real-time telescope and dome telemetry",
-    docs_url="/docs",
-    lifespan=lifespan
-)
+logger = logging.getLogger("app")
 
-app.include_router(api_router, prefix="/api")
-app.include_router(dome_router, prefix="/api")
-app.include_router(system_router, prefix="/api")
-app.include_router(shutter_router, prefix="/api")
-app.include_router(telescope_router, prefix="/api")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI lifespan context manager for managing startup and shutdown events.
+    Connects to the telescope mount on startup and closes the connection on shutdown.
+    """
+    logger.info("Application startup: Connecting to telescope mount...")
+    try:
+        await mount.connect()
+        logger.info("Successfully connected to telescope mount.")
+    except MountError as e:
+        logger.error(f"Failed to connect to mount on startup: {e}")
+    yield # Application runs
+    logger.info("Application shutdown: Disconnecting from telescope mount...")
+    await mount.close()
+    logger.info("Telescope mount connection closed.")
 
+app = FastAPI(lifespan=lifespan)
+
+app.include_router(routes.router, prefix="/api")
+app.include_router(telescope.router, prefix="/api")
+app.include_router(dome.router, prefix="/api")
+app.include_router(shutter.router, prefix="/api")
+app.include_router(system.router, prefix="/api")

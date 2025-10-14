@@ -11,130 +11,122 @@ from app.models.schemas import (
     MessageResponse,
     TemperatureStatus
 )
-# from app.api.tenmicron.tenmicron import TenMicronMount, MountError
-from app.api.tenmicron.tenmicron_fake import TenMicronMountFake, MountError
+from app.api.tenmicron.tenmicron import TenMicronMount, MountError
+# from app.api.tenmicron.tenmicron_fake import TenMicronMountFake, MountError
 import logging
-import time
-from contextlib import asynccontextmanager
+import asyncio
 
 
 router = APIRouter(prefix="/telescope", tags=["Telescope"])
-mount = TenMicronMountFake("192.168.1.10", port=3492, timeout=10)
+mount = TenMicronMount("192.168.1.10", port=3492, timeout=10)
+# mount = TenMicronMountFake("192.168.1.10", port=3492, timeout=10)
 
 logger = logging.getLogger("telescope")
 
-@asynccontextmanager
-async def lifespan(app):
-    try:
-        mount.connect()
-    except Exception as e:
-        logger.error(f"Failed to connect to mount: {e}")
-    yield
-    try:
-        mount.close()
-    except Exception as e:
-        logger.error(f"Error while disconnecting from mount: {e}")
+# The mount connection will be handled by the main FastAPI application's lifespan events.
+# Do not attempt to connect here at the module level.
+
 
 # ----------------------------------------------------------------------
 # GET ROUTES
 # ----------------------------------------------------------------------
 
 @router.get("/mount_status", response_model=MountStatus)
-def get_mount_status():
+async def get_mount_status():
     """Get all information about the mount's current status."""
     try:
-        ra, dec = mount.get_mount_ra_dec()
-        alt, az = mount.get_mount_alt_az()
-        date, time = mount.get_local_date_time()
+        ra, dec = await mount.get_mount_ra_dec()
+        alt, az = await mount.get_mount_alt_az()
+        date, time = await mount.get_local_date_time()
         return MountStatus(
-            status=mount.get_status(),
+            status=await mount.get_status(),
             ra_str=ra, # type: ignore
             dec_str=dec, # type: ignore
             alt_str=alt, # type: ignore
             az_str=az, # type: ignore
-            pier_side=mount.pier_side(),
+            pier_side=await mount.pier_side(),
             local_time=time,
             local_date=date,
-            is_tracking=mount.is_tracking(),
+            is_tracking=await mount.is_tracking(),
         )
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 
 @router.get("/firmware_info", response_model=FirmwareInfo)
-def get_firmware_info():
+async def get_firmware_info():
     """Get firmware version and version information."""
     try:
         return FirmwareInfo(
-            product_name=mount.product_name(),
-            firmware_number=mount.firmware_number(),
-            firmware_date=mount.firmware_date(),
-            firmware_time=mount.firmware_time(),
-            hardware_version=mount.hardware_version(),
+            product_name=await mount.product_name(),
+            firmware_number=await mount.firmware_number(),
+            firmware_date=await mount.firmware_date(),
+            firmware_time=await mount.firmware_time(),
+            hardware_version=await mount.hardware_version(),
         )
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 
 @router.get("/limits", response_model=MountLimits)
-def get_mount_limits():
+async def get_mount_limits():
     """Get the mount's configured limits."""
     try:
         return MountLimits(
-            min_altitude=mount.get_lower_limit(),
-            max_altitude=mount.get_upper_limit(),
+            min_altitude=await mount.get_lower_limit(),
+            max_altitude=await mount.get_upper_limit(),
         )
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 
 @router.get("/target_status", response_model=TargetStatus)
-def get_target_status():
+async def get_target_status():
     """Get all information about the target's current status."""
     try:
-        ra, dec = mount.get_target_ra_dec()
-        alt, az = mount.get_target_alt_az()
+        ra, dec = await mount.get_target_ra_dec()
+        alt, az = await mount.get_target_alt_az()
         return TargetStatus(
             target_ra_str=ra,
             target_dec_str=dec,
             target_alt_str=alt,
             target_az_str=az,
-            is_trackable=mount.target_trackable(),
+            is_trackable=await mount.target_trackable(),
         )
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 
 @router.get("/time", response_model=TimeInfo)
-def get_time():
+async def get_time():
     """Get the mount's current time and date."""
     try:
-        local_date, local_time = mount.get_local_date_time()
-        utc_date, utc_time = mount.get_utc_date_time()
+        local_date, local_time = await mount.get_local_date_time()
+        utc_date, utc_time = await mount.get_utc_date_time()
         return TimeInfo(
             local_time=local_time,
             local_date=local_date,
             utc_time=utc_time,
             utc_date=utc_date,
-            utc_offset=mount.get_utc_offset(),
-            julian_date=mount.get_julian_date(extra_precision=True),
-            sidereal_time=mount.get_sidereal_time(),
+            utc_offset=await mount.get_utc_offset(),
+            julian_date=await mount.get_julian_date(extra_precision=True),
+            sidereal_time=await mount.get_sidereal_time(),
         )
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 
 @router.get("/network_status", response_model=NetworkStatus)
-def get_network_status():
+async def get_network_status():
     """Get the mount's network status."""
     try:
-        conn_type = mount.get_connection_type()
+        conn_type = await mount.get_connection_type()
         
         aps = []
-        if mount.scan_wireless():
-            time.sleep(1)
+        if await mount.scan_wireless():
+            await asyncio.sleep(1) # Use asyncio.sleep for non-blocking delay
             try:
-                aps = mount.wireless_access_points()
+                aps = await mount.wireless_access_points()
             except MountError as e:
                 if "Wireless scan is still underway" in str(e):
                     pass
@@ -142,11 +134,11 @@ def get_network_status():
                     raise e
         
         if conn_type == "Wireless LAN":
-            ip, subnet, gateway, dhcp = mount.get_ip_info(wireless=True)
+            ip, subnet, gateway, dhcp = await mount.get_ip_info(wireless=True)
         elif conn_type == "Cabled LAN":
-            ip, subnet, gateway, dhcp = mount.get_ip_info(wireless=False)
+            ip, subnet, gateway, dhcp = await mount.get_ip_info(wireless=False)
         else:
-            raise ValueError(f"Unsupported connection type: {conn_type}")
+            ip, subnet, gateway, dhcp = "N/A", "N/A", "N/A", False # Handle non-IP connections like Serial
         
         return NetworkStatus(
             ip_address=ip,
@@ -161,10 +153,10 @@ def get_network_status():
 
 
 @router.get("/home_status", response_model=HomeStatus)
-def get_home_status():
+async def get_home_status():
     """Return the home status"""
     try:
-        status_code = mount.home_status()
+        status_code = await mount.home_status()
         status_map = {
             '0': "Home search failed",
             '1': "Home search found",
@@ -179,7 +171,7 @@ def get_home_status():
 
 
 @router.get("/temperatures", response_model=TemperatureStatus)
-def get_all_temperatures():
+async def get_all_temperatures():
     """Get the temperatures of various components of the mount."""
     
     elements_dict = {
@@ -197,7 +189,7 @@ def get_all_temperatures():
     
     try:
         for element, name in elements_dict.items():
-            temp = mount.get_element_temperature(element)
+            temp = await mount.get_element_temperature(element)
             if temp == "Unavailable":
                 continue
             temperatures[name] = float(temp)
@@ -220,37 +212,37 @@ def get_all_temperatures():
 # ----------------------------------------------------------------------
 
 @router.post("/tracking/start", response_model=MessageResponse)
-def start_tracking():
+async def start_tracking():
     """Start tracking."""
-    if mount.is_tracking():
+    if await mount.is_tracking():
         raise HTTPException(status_code=400, detail="Tracking is already enabled.")
-    if not mount.target_trackable():
+    if not await mount.target_trackable():
         raise HTTPException(status_code=400, detail="Target is not trackable. Set a new target")
     
     try:
-        mount.start_tracking()
+        await mount.start_tracking()
         return MessageResponse(message="Tracking enabled.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/tracking/stop", response_model=MessageResponse)
-def stop_tracking():
+async def stop_tracking():
     """Stop tracking."""
-    if mount.is_tracking():
-        mount.stop_tracking()
+    if await mount.is_tracking():
+        await mount.stop_tracking()
         return MessageResponse(message="Tracking disabled.")
 
 @router.post("/target", response_model=MessageResponse)
-def set_target(coords: SetCoordinatesRequest):
+async def set_target(coords: SetCoordinatesRequest):
     """Set the target coordinates for a future slew."""
     try:
         if coords.ra is not None and coords.dec is not None:
-            result = mount.set_target_ra_dec(coords.ra, coords.dec)
+            result = await mount.set_target_ra_dec(coords.ra, coords.dec)
             if result['ra'] == '0' or result['dec'] == '0':
                 raise HTTPException(status_code=400, detail=f"Invalid RA/Dec coordinates provided. RA valid: {result['ra']}, Dec valid: {result['dec']}")
             return MessageResponse(message="Equatorial target set successfully.")
         elif coords.alt is not None and coords.az is not None:
-            result = mount.set_target_alt_az(coords.alt, coords.az)
+            result = await mount.set_target_alt_az(coords.alt, coords.az)
             if result['alt'] == '0' or result['az'] == '0':
                 raise HTTPException(status_code=400, detail=f"Invalid Alt/Az coordinates provided. Alt valid: {result['alt']}, Az valid: {result['az']}")
             return MessageResponse(message="Altitude/Azimuth target set successfully.")
@@ -260,13 +252,13 @@ def set_target(coords: SetCoordinatesRequest):
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/slew", response_model=MessageResponse)
-def slew_to_target(pier_side: str | None = None):
+async def slew_to_target(pier_side: str | None = None):
     """Slew to the currently set target coordinates."""
     if pier_side is not None and pier_side not in ["East", "West"]:
         raise HTTPException(status_code=400, detail="Invalid pier side. Must be 'East' or 'West'.")
     
     try:
-        mount.slew_to_target_equatorial(pier_side=pier_side)
+        await mount.slew_to_target_equatorial(pier_side=pier_side)
         return MessageResponse(message="Slew command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
@@ -274,69 +266,69 @@ def slew_to_target(pier_side: str | None = None):
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/flip", response_model=MessageResponse)
-def flip_mount():
+async def flip_mount():
     """Flip the mount's pier side."""
     try:
-        mount.flip()
+        await mount.flip()
         return MessageResponse(message="Flip command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/park", response_model=MessageResponse)
-def park_mount():
+async def park_mount():
     """Park the mount."""
     try:
-        mount.park()
+        await mount.park()
         return MessageResponse(message="Park command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
     
 @router.post("/unpark", response_model=MessageResponse)
-def unpark_mount():
+async def unpark_mount():
     """Unpark the mount."""
     try:
-        mount.unpark()
+        await mount.unpark()
         return MessageResponse(message="Unpark command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/home", response_model=MessageResponse)
-def home_mount():
+async def home_mount():
     """Start the mount's homing sequence."""
     try:
-        mount.seek_home()
+        await mount.seek_home()
         return MessageResponse(message="Homing sequence initiated.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/nudge", response_model=MessageResponse)
-def nudge_mount(direction: str, duration_ms: int):
+async def nudge_mount(direction: str, duration_ms: int):
     """Nudge the mount."""
     
     if direction not in ["N", "S", "E", "W", "n", "s", "e", "w"]:
         raise HTTPException(status_code=400, detail="Invalid direction. Must be N, S, E, or W.")
     
     try:
-        mount.nudge(direction, duration_ms)
+        await mount.nudge(direction, duration_ms)
         return MessageResponse(message="Nudge command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/move", response_model=MessageResponse)
-def move_mount(direction: str):
+async def move_mount(direction: str):
     """Start moving the mount in the specified direction."""
     
     if direction not in ["N", "S", "E", "W", "n", "s", "e", "w"]:
         raise HTTPException(status_code=400, detail="Invalid direction. Must be N, S, E, or W.")
     
     try:
-        mount.move_direction(direction)
+        await mount.move_direction(direction)
         return MessageResponse(message="Move command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/halt", response_model=MessageResponse)
-def halt_mount(direction: str | None = None):
+async def halt_mount(direction: str | None = None):
     """Halt the mount's current movement in 1 or all directions."""
     
     if direction == "":
@@ -345,16 +337,16 @@ def halt_mount(direction: str | None = None):
         raise HTTPException(status_code=400, detail="Invalid direction. Must be N, S, E, or W.")
     
     try:
-        mount.halt_movement(direction)
+        await mount.halt_movement(direction)
         return MessageResponse(message="Halt command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/stop", response_model=MessageResponse)
-def stop_mount():
+async def stop_mount():
     """Immediately stop ALL mount movement including tracking, slewing and homing."""
     try:
-        mount.stop_all_movement()
+        await mount.stop_all_movement()
         return MessageResponse(message="STOP command issued.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
@@ -364,10 +356,10 @@ def stop_mount():
 # ----------------------------------------------------------------------
 
 @router.post("/send_custom")
-def send_custom_command(command: str = Body(..., embed=True)):
+async def send_custom_command(command: str = Body(..., embed=True)):
     """Send a custom command to the mount (WITHOUT THE TRAILING `#`)."""
     try:
-        mount.send_command(command)
+        await mount.send_command(command)
         return MessageResponse(message="Command sent successfully.")
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
