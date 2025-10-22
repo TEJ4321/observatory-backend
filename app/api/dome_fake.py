@@ -102,3 +102,13 @@ class DomeFake:
         # Simulate slew time: 5 degrees per second
         slew_rate = 5.0 # deg/s
         self._move_duration = abs(self._target_azimuth - self._start_azimuth) / slew_rate
+
+    async def stop_movement(self):
+        """Stops any ongoing dome movement."""
+        if not self._is_connected:
+            raise DomeError("Dome not connected")
+
+        # Update position to the current interpolated position before stopping
+        self._update_position()
+        if self._is_moving:
+            self._is_moving = False

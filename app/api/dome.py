@@ -55,6 +55,15 @@ async def dome_move(request: DomeMoveRequest):
     except DomeError as e:
         raise HTTPException(status_code=409, detail=str(e)) # 409 Conflict if already moving
 
+@router.post("/stop", response_model=DomeStatus)
+async def dome_stop():
+    """Stop any current dome movement."""
+    try:
+        await dome.stop_movement()
+        return await dome_status()
+    except DomeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
 @router.post("/sync/on", response_model=DomeSyncStatus)
 async def dome_sync_on():
     """Enable dome synchronization with the telescope."""
