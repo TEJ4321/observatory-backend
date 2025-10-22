@@ -6,6 +6,7 @@ from app.models.schemas import (
     TargetStatus,
     TimeInfo,
     NetworkStatus,
+    SlewRequest,
     HomeStatus,
     SetCoordinatesRequest,
     MessageResponse,
@@ -252,14 +253,22 @@ async def set_target(coords: SetCoordinatesRequest):
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
 
 @router.post("/slew", response_model=MessageResponse)
-async def slew_to_target(pier_side: str | None = None):
+async def slew_to_target(request: SlewRequest):
     """Slew to the currently set target coordinates."""
-    if pier_side is not None and pier_side not in ["East", "West"]:
+    if request.pier_side is not None and request.pier_side not in ["East", "West"]:
         raise HTTPException(status_code=400, detail="Invalid pier side. Must be 'East' or 'West'.")
     
+    if request.slew_type not in ["equatorial", "altaz"]:
+        raise HTTPException(status_code=400, detail="Invalid slew_type. Must be 'equatorial' or 'altaz'.")
+
     try:
-        await mount.slew_to_target_equatorial(pier_side=pier_side)
-        return MessageResponse(message="Slew command issued.")
+        if request.slew_type == "equatorial":
+            await mount.slew_to_target_equatorial(pier_side=request.pier_side)
+            message = "Equatorial slew command issued (will track)."
+        else: # altaz
+            await mount.slew_to_target_altaz()
+            message = "Alt/Az slew command issued (will not track)."
+        return MessageResponse(message=message)
     except MountError as e:
         raise HTTPException(status_code=503, detail=f"Mount communication error: {e}")
     except ValueError as e:

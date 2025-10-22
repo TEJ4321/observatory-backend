@@ -109,7 +109,9 @@ class FlipResponse(BaseModel):
     """Response to a flip mount request."""
     sucess: bool = Field(..., description="True if the flip was successful.", examples=[True])
     
-
+class SlewRequest(BaseModel):
+    slew_type: str = Field(..., description="The type of slew to perform: 'equatorial' or 'altaz'.")
+    pier_side: Optional[str] = Field(None, description="Desired pier side for equatorial slews: 'East' or 'West'.")
 
 # ---------------- Dome ----------------
 class DomeStatus(BaseModel):
