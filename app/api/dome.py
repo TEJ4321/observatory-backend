@@ -7,10 +7,11 @@ from app.models.schemas import (
     DomeSlaveRequest,
     DomeSyncStatus,
 )
-from .dome_fake import DomeFake, DomeError
+from .dome_fake import DomeFake, DomeError # Using fake dome
+from .telescope import mount as telescope_mount # Import the mount instance
 
 
-dome = DomeFake()
+dome = DomeFake(mount=telescope_mount) # Pass mount instance to dome
 
 @asynccontextmanager
 async def lifespan(app: APIRouter):
@@ -65,21 +66,9 @@ async def dome_stop():
     except DomeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-@router.post("/sync/on", response_model=DomeSyncStatus)
-async def dome_sync_on():
-    """Enable dome synchronization with the telescope."""
-    await dome.set_sync(True)
-    return DomeSyncStatus(dome_sync=await dome.get_sync_status())
-
-@router.post("/sync/off", response_model=DomeSyncStatus)
-async def dome_sync_off():
-    """Disable dome synchronization with the telescope."""
-    await dome.set_sync(False)
-    return DomeSyncStatus(dome_sync=await dome.get_sync_status())
-
-@router.post("/slave", response_model=DomeSyncStatus)
+@router.post("/sync", response_model=DomeSyncStatus)
 async def dome_set_slave(request: DomeSlaveRequest):
-    """Enable or disable dome synchronization with the telescope."""
+    """Enable or disable dome synchronization (slaving) with the telescope."""
     try:
         await dome.set_sync(request.slave)
         return DomeSyncStatus(dome_sync=await dome.get_sync_status())
