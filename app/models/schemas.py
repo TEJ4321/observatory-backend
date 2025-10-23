@@ -126,6 +126,9 @@ class DomeMoveRequest(BaseModel):
 class DomeSyncStatus(BaseModel):
     dome_sync: bool = Field(..., description="True if dome is syncing with telescope", examples=[True])
 
+class DomeSlaveRequest(BaseModel):
+    slave: bool = Field(..., description="Set to true to enable slaving, false to disable.", examples=[True])
+
 
 
 
